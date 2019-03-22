@@ -1,7 +1,8 @@
-# GRE_Annotator
-Genomic Repetitive Elements Annotator
+# GREAT
+Genomic Repetitive Elements Annotation Tool
+---
 
-The Genomic Repetitive Elements (GRE) Annotator is a 
+The Genomic Repetitive Elements Annotation Pipeline (GREAT)
 Perl pipeline designed to combine different tools and 
 programs to annotate repetitive elements.
 
