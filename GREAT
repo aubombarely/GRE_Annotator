@@ -1,0 +1,1756 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ GREAT
+ Genomic Repetitive Elements Annotation Tool
+
+=cut
+
+our $version = '0.1.1';
+
+=head1 SYPNOSIS
+
+ GREAT [-h][-v] -g <genomic_sequence> -o <outdir> 
+                [-t <threads>] [-r <tRNA_fasta>]
+                [-p <pass_argument_to_program>] 
+                [-s <run_steps>]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -g
+
+B<genomic_sequence>      genomic sequence in FASTA format (mandatory)
+
+=item -o
+
+B<outdir>                name of the out directory (mandatory)
+
+=item -t
+
+B<threads>               number of threads (default: 1)
+
+=item -p
+
+B<pass_argument>         pass argument to program (optional-see details)
+
+=item -r
+
+B<tRNA_fasta>            fasta file with tRNA sequences (optional)
+
+=item -s
+
+B<run_steps>             run only the steps specified in this list (optional, default all)
+
+=item -P
+
+B<print_program_names>   print the program names available for the -p option
+
+=item -V
+
+B<be_verbose>            be verbose and print the parsing status.
+
+=item -v
+
+B<version>               print version
+
+=item -h
+
+B<help>                  print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ The Genomic Repetitive Elements Annotation Pipeline (GREAT) is a 
+ Perl pipeline designed to combine different tools and programs to 
+ annotate repetitive elements.
+
+ This pipeline can annotate the following elements:
+
+  * Transposons
+    + Class I:
+      - LTR: LTR/Copia, LTR/Gypsy and ERV
+      - Non-LTR: LINE and SINE
+    + Class II:
+      - TIRs Order
+      - Helitron Order
+      - Maverick Order
+      - MITEs
+  * NUPTs and NUMTs
+  * Satellite DNA (e.g. telomeres and centromeres)
+  * rDNA and tDNA
+
+ At the end of the annotation, the pipeline will mcompare these elements
+ with known genes to make the distition between high copy number (HCN) 
+ genes and repetitive elements.
+
+ The tools that this program uses are: BLAST+, GenomeTools, LTR_Finder, 
+ LTR_retriever, HelitronScanner, MITE_Hunter, MITE_FinderII, RepeatMasker,
+ RepeatModeler, PFScan from InterProScan, tRNAScan-SE, BARRNAp, Bedtools 
+ and the tools associated to those (e.g. HMMER and Infernal).
+
+ The script will look for this tools using the PATH or with specific
+ ENV_VARIABLES with the path to the binary files. E.g. BLAST_PATH, 
+ GENOMETOOLS_PATH, LTRRETRIEVER_PATH, LTRFINDER_PATH, MGSCAN_PATH, 
+ MITEHUNTER_PATH, MITEFINDER_PATH, REPEATMASKER_PATH, REPEATMODELER_PATH, 
+ TRNASCANSE_PATH, BARRNAP_PATH, MUSCLE_PATH or to the .jar file, e.g. 
+ HELITRONSCANNER_JAR.
+
+ The tool also needs the location of the pfscan directory with the pfscan
+ executable and the prosite.dat file added as PFSCAN_DIR env. variable.
+
+ The arguments for each of the programs can be supplied with the argument
+ -p "PROGRAM_NAME:[ARG1=VALUE1][ARG2=VALUE2];PROGRAM_NAME2:[ARG1=VALUE1]"
+ or as -p <argument_file> (no colons) in which the format will be:
+ PROGRAM_NAME:
+  :SUBPROGRAM:
+    ARGUMENT1=VALUE1
+  
+ Examples in a command line:
+ -p MITEFINDER:[threshold=0.7]
+ -p GENOMETOOLS::ltrharvest:[maxlenltr=6000][maxdistltr=25000]
+
+ Examples in a file:
+ MITEFINDER:
+  thredshold=0.7
+ GENOMETOOLS:
+  :ltrharvest:
+   maxlenltr=6000
+   maxdistltr=25000
+
+  For a complete list of program names use the option -P.
+
+  The program can use a fasta file with sequences of tRNA
+  (option -r) for the LTR curation or just use of the tRNA 
+  sequences predicted by tRNAScan-SE. 
+
+  The user also can decide to run only some specific steps
+  using the option -s. This option will prevent also of stop
+  the pipeline if program is not available. The steps code 
+  are as follows:
+ 
+   + 011 for rDNA de-novo annotations with BARRNAP,
+   + 012 for tDNA de-novo annotations with TRNASCANSE,
+   + 021 for Class I, LTR de-novo annotations with GENOMETOOLS,
+   + 022 for Class I, LTR de-novo annotations with LTRFINDER,
+   + 023 for Class I, LTR & non-LTR de-novo annotations with MGESCAN,
+   + 024 for Class I, LTR refining with LTRRETRIEVER (021, 022 or 023 required),
+   + 031 for Class II, Helitron TEs de-novo annotations with HELITRONSCANNER,
+   + 041 for MITE de-novo annotation with MITEHUNTER,
+   + 042 for MITE de-novo annotation with MITEFINDER,
+   + 051 for library based repeat annotation with REPEATMASKER,
+   + 052 for de-novo repetitive element annotation with REPEATMODELER (051 required)
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely.
+  (aureliano.bombarely@unimi.it).
+
+=cut
+
+=head1 METHODS
+
+ GREAT
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use File::Spec;
+use File::Basename;
+use File::Copy;
+use File::Path qw(make_path remove_tree);
+use IPC::Cmd qw[can_run run];
+
+use Math::BigFloat;
+
+use Bio::SeqIO;
+use Bio::AlignIO;
+
+our($opt_g, $opt_o, $opt_t, $opt_r, $opt_p, $opt_s, 
+    $opt_P, $opt_V, $opt_v, $opt_h);
+
+getopts("g:o:t:r:p:s:PVvh");
+if (!$opt_g && !$opt_o && !$opt_t && !$opt_r && !$opt_p 
+    && !$opt_s && !$opt_P && !$opt_V && !$opt_v && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+elsif ($opt_h) {
+    help();
+}
+elsif ($opt_v) {
+    print STDERR "\nGREAT version:$version (Isn't it?)\n";
+    print STDERR "Developed at Bombarely Labs (2019-03-21)\n\n";
+    exit(1);
+}
+
+
+my %available_programs = (
+    'MAKEBLASTDB'               => 1,
+    'BLASTN'                    => 1,
+    'GT::SUFFIXERATOR'          => 1,
+    'GT::LTRHARVEST'            => 1,
+    'GT::GFF3'                  => 1,
+    'GT::LTRDIGEST'             => 1,
+    'LTR_FINDER'                => 1,
+    'LTR_RETRIEVER'             => 1,
+    'MITE_HUNTER_MANAGER'       => 1,
+    'MITEFINDER'                => 1,
+    'TRNASCANSE'                => 1,
+    'BARRNAP'                   => 1,
+    'REPEATMASKER'              => 1,
+    'BUILDDATABASE'             => 1,
+    'REPEATMODELER'             => 1,
+    'REPEATCLASSIFIER'          => 1,
+    'BEDTOOLS'                  => 1,
+    'HELITRONSCANNER::SCANHEAD' => 1,
+    'HELITRONSCANNER::SCANTAIL' => 1,
+    'HELITRONSCANNER::PAIRENDS' => 1,
+    'HELITRONSCANNER::DRAW'     => 1,
+);
+
+if ($opt_P) {
+
+    print STDERR "\n\n\tThe list of available program names for -p option are:\n";
+    foreach my $prog (sort keys %available_programs) {
+
+        print STDERR "\t\t$prog\n";
+    } 
+    print STDERR "\n\n";
+    exit(1);
+}
+
+
+
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GREAT Starts ($date) ##\n";
+print STDERR "############################################################\n\n";
+
+## Define a variable to keep the stats;
+
+my %gstats = ();
+
+print_header("0) Checking arguments");
+
+##############################################################################
+## CHECK ARGUMENTS
+##############################################################################
+
+## Get the arguments and check them
+
+## MANDATORY ARGUMENTS ##
+my $genome = $opt_g || 
+   die("\nINPUT ARG. ERROR: -g <genomic_sequence> argument was not supplied.\n\n");
+print STDERR "\tGenomic input sequence: $genome\n";
+
+my $outdir = $opt_o ||
+    die("\nINPUT ARG. ERROR: -o <output_dir> argument was not supplied.\n\n");
+
+print STDERR "\tOutput directory: $outdir\n";
+
+unless (-d $outdir) {
+
+    die("\nERROR: Out directory does not exist. Please create it.\n\n");
+}
+
+
+## OPTIONAL ARGUMENTS ##
+my $threads = $opt_t || 1;
+if ($opt_t && $opt_t !~ m/^(\d+)$/) {
+
+	die("\nERROR: -t <threads> is not a numberic value.\n");
+}
+else {
+
+    print STDERR "\n\t$threads threads will be used to run the script.\n";
+}
+
+my $trna_file = '';
+if ($opt_r) {
+
+    if (-e $opt_r) {
+
+       $trna_file = $opt_r;
+       print STDERR "\n\t$opt_r file will be used as tRNA source for LTR curation.\n";
+    }
+    else {
+
+        die("\nERROR: -r $opt_r file does not exist.\n");
+    }	
+}
+else {
+
+    print STDERR "\n\ttRNAScan-SE prediction will be used as tRNA file for LTR curation\n";
+}
+
+
+
+my %program_args = ();
+if ($opt_p) {
+
+    %program_args= parse_program_args(\%available_programs, $opt_p);
+    foreach my $prog (sort keys %program_args) {
+
+        print STDERR "\n\tArguments for program: $prog\n";
+	my %subargs = %{$program_args{$prog}};
+        foreach my $argument (sort keys %subargs) {
+
+	    if ($subargs{$argument} =~ m/.+/) {
+
+                print STDERR "\t\targument: $argument with value: $subargs{$argument}\n";
+            }
+	    else {
+
+	        print STDERR "\t\targument: $argument switched ON\n";
+	    }
+        }
+    }
+}
+
+## CHECK THE PROGRAM EXECUTABLES AND PATHS
+print STDERR "\n\n\t** CHECKING EXECUTABLES AND PATHS **\n";
+
+## Programs detailed in the step list
+## potentially could be ignored using the 
+## option -s
+
+my %steps = (
+    "011" => "BARRNAP",
+    "012" => "TRNASCANSE",
+    "021" => "GENOMETOOLS",
+    "022" => "LTRFINDER",
+    "023" => "MGESCAN",
+    "024" => "LTRRETRIEVER",
+    "031" => "HELITRONSCANNER",
+    "041" => "MITEHUNTER",
+    "042" => "MITEFINDER",
+    "051" => "REPEATMASKER",
+    "052" => "REPEATMODELER"
+);
+
+## Depending steps will force to check that 
+## excluding steps are not incompatible, for
+## example you should run RepeatModeler if you
+## have not run RepeatMasker before
+
+my %stepdeps = (
+    "024" => ["021", "022", "023"],	
+    "051" => ["024"],
+    "052" => ["051"]	
+);
+
+my %selected_steps = ();
+if ($opt_s) {
+
+    my @def_steps = split(/,/, $opt_s);
+    foreach my $defined_step (@def_steps) {
+
+        unless (exists $steps{$defined_step}) {
+
+            die("\nERROR: $defined_step step does not exists. Please check the manual.\n");
+        }
+        else {
+
+            $selected_steps{$defined_step} = $steps{$defined_step};
+        }
+    }	
+}
+else {
+
+     %selected_steps = %steps;
+}
+
+
+
+my %exec_list = (
+    BLAST_PATH         => ['makeblastdb', 'blastn'],
+    GENOMETOOLS_PATH   => ['gt'],
+    LTRFINDER_PATH     => ['ltr_finder'],
+    MGESCAN_PATH       => ['mgescan'],
+    LTRRETRIEVER_PATH  => ['LTR_retriever'],
+    MITEHUNTER_PATH    => ['MITE_Hunter_manager.pl'],
+    MITEFINDER_PATH    => ['miteFinder'],
+    TRNASCANSE_PATH    => ['tRNAscan-SE'],
+    BARRNAP_PATH       => ['barrnap'],
+    REPEATMASKER_PATH  => ['RepeatMasker'],
+    REPEATMODELER_PATH => ['BuildDatabase', 'RepeatModeler', 'RepeatClassifier'],
+    BEDTOOLS_PATH      => ['bedtools'],
+    MUSCLE_PATH        => ['muscle']
+    ); 
+
+my %exepath = ();
+
+foreach my $exec_key (sort keys %exec_list) {
+
+    my @execitems = @{$exec_list{$exec_key}};
+    foreach my $e_item (@execitems) {
+
+	if (exists $ENV{$exec_key}) {
+    
+	    print STDERR "\t$exec_key PATH defined for $e_item executable\n";
+	    $exepath{$e_item} = File::Spec->catfile($ENV{$exec_key}, $e_item);
+	    my $exe_path = can_run($exepath{$e_item});
+	    unless ($exe_path) {
+
+	        die("\n\tERROR: $e_item is not available at $exepath{$e_item}\n");
+	    }
+	}
+	else {
+    
+	    my $exe_path = can_run($e_item);
+	    if ($exe_path) {
+		
+		$exepath{$e_item} = $exe_path;
+		print STDERR "\t$e_item is available in the PATH ($exe_path)\n";
+	    }
+	    else {
+		
+		print STDERR "\nERROR: $e_item executable ($exec_key package)";
+		die(" is not accessible.\n");
+	    }	   
+	}	
+    }
+}
+
+
+## CHECK THE JAR FILES
+
+my %jar_list = (
+    HELITRONSCANNER_JAR => ['HelitronScanner.jar'],
+    );
+
+foreach my $jarfile (sort keys %jar_list) {
+
+    if (!$ENV{$jarfile}) {
+
+	die("\nERROR: HELITRONSCANNER_JAR enviromental variable has not been set.\n"); 
+    }
+    else {
+
+	my @hels_exe = ("java");
+	push(@hels_exe, "-jar");
+	push(@hels_exe, $ENV{$jarfile});
+	my $hels_exe = join(" ", @hels_exe);
+
+	my $hels_path = can_run(@hels_exe);
+	if ($hels_path) {
+
+	    $exepath{'helitronscanner'} = \@hels_exe;
+    	    print STDERR "\tHelitronScanner is available in the PATH:\n\t$hels_exe\n";
+	}
+	else {
+            print STDERR "\nERROR: HelitronScanner executable (@hels_exe)";
+            die(" is not accessible.\n");
+	}
+    }
+}
+
+## There are additional files associated to some of the programs that are 
+## needed in order to be able to run the program. These files are:
+
+## Database with tRNA sequences needed by ltrdigest. Potentially
+## barrnap should resolve this problem as soon as it is run before
+
+## Helitron scanner training files: head.lcvs and tail.lcvs
+## The simplest solution will be to use the .jar path and check if the files
+## are in the TrainingSet directory
+
+my $hscan_dir = dirname($ENV{HELITRONSCANNER_JAR});
+my $hscan_tdir = File::Spec->catfile($hscan_dir, "../TrainingSet");
+
+my @hscan_conffiles = ('head.lcvs', 'tail.lcvs');
+foreach my $cfile (@hscan_conffiles) {
+
+    my $fullpath = File::Spec->catfile($hscan_tdir, $cfile);
+    if (-e $fullpath) {
+	print STDERR "\t$cfile HelitronScanner training file found at\n\t$fullpath\n";
+    }
+    else {
+        die("\nERROR: $cfile HelitronScanner training file not found at $hscan_tdir.\n");
+    }	
+}
+
+## Other files that should be available are:
+## pfscan executable and prosite.dat file
+## these two programs are going to be needed by LTRFINDER.
+
+## Easiest, just check for the env. variable
+unless (exists $ENV{PFSCAN_DIR}) {
+
+    die("\nERROR: PFSCAN_DIR env. variable has not been set.\n");
+}
+else {
+
+   ## Check for the bin and the prosite files
+   my @pffiles = ("pfscan", "pfsearch", "prosite.dat");
+   foreach my $pffile (@pffiles) {
+       my $fpath = File::Spec->catfile($ENV{PFSCAN_DIR}, $pffile);
+       unless (-e $fpath) {
+ 
+          my $error = "\nERROR: $pffile does not exists at $ENV{PFSCAN_DIR}.";
+          $error .= "\n\tPlease check atht @pffiles are at $ENV{PFSCAN_DIR}\n";
+	  die($error);
+       }
+   }
+}
+
+
+##############################################################################
+## BASENAME:
+## All the out will use as basename genome without .fasta or .fas
+
+my @bnames = fileparse($genome, ('.fasta', '.fas', '.fa'));
+my $bname = $bnames[0];
+print STDERR "\n\tFile extracted basename: $bname\n";
+
+##############################################################################
+## STEP 1: Run the tRNA and rRNA tools (implement in the future other ncRNA)
+##############################################################################
+
+print_header("1) Running tRNA and rRNA de-novo predictor tools");
+
+my $dir01_ncRNA = File::Spec->catfile($outdir, "01_ncRNA_Annotation");
+mkdir($dir01_ncRNA) unless (-d $dir01_ncRNA);
+
+### Run BARRNAp
+
+print STDERR "\t1.1- Running BARRNAP\n";
+
+my $dir011_barrnap = File::Spec->catfile($dir01_ncRNA, "011_BARRNAp");
+mkdir($dir011_barrnap) unless (-d $dir011_barrnap);
+my $out011_barrnap = File::Spec->catfile($dir011_barrnap, $bname ."_BARRNAp.rRNA.gff");
+my @cmd01_barrnap = ($exepath{'barrnap'});
+
+## Overwrite specific arguments for barrnap
+
+my %barrnap_args = ('--kingdom' =>  'euk');
+
+## We will reduce the evalue cutoff value to 0.001
+## by default, although it should be a ble to be 
+## overwritten.
+$barrnap_args{'--evalue'} = "0.001";
+
+if (exists $program_args{'BARRNAP'}) {
+
+	%barrnap_args = %{$program_args{'BARRNAP'}};
+}
+
+$barrnap_args{'--threads'} = $threads;
+
+foreach my $barrnap_arg (sort keys %barrnap_args) {
+
+   push(@cmd01_barrnap, ($barrnap_arg, $barrnap_args{$barrnap_arg})); 
+}
+
+push(@cmd01_barrnap, ($genome, '>', $out011_barrnap));
+
+my $cmd01_barrnap = join(" ", @cmd01_barrnap); 
+my @cmd01run = run( command => $cmd01_barrnap, verbose => $opt_V );
+if (!$cmd01run[0]) {
+
+	die("\n\t\tERROR: $cmd01_barrnap run with the error:\n\t$cmd01run[2]->[0]\n");
+}
+
+## Parse the file to get the info about how many rRNA were found
+my %rrna_c = ();
+open my $bar_io, '<', $out011_barrnap;
+while (<$bar_io>) {
+
+    chomp($_);
+    if ($_ =~ m/.+/ && $_ !~ m/#/) {
+
+        my @line = split(/\t/, $_);
+        my %feats = ();
+        foreach my $feat (split(/;/, $line[8])) {
+
+            if ($feat =~ m/^(.+)=(.+)$/) {
+   
+                $feats{$1} = $2;
+            }
+        }
+        if (exists $rrna_c{$feats{'product'}}) {
+
+            $rrna_c{$feats{'product'}}++;
+        } 
+        else {
+
+            $rrna_c{$feats{'product'}} = 1;
+        }
+    }
+}
+
+print STDERR "\n\t\tBARRNAP finished.\n\t\tOutput at $dir011_barrnap\n";
+print STDERR "\t\tSummary of predicted rRNA:\n";
+foreach my $rrna (sort keys %rrna_c) {
+
+    print STDERR "\t\t\t$rrna\t$rrna_c{$rrna}\n";
+}
+
+## Extract the FASTA from the GFF using bedtools
+
+print STDERR "\n\t\tExtracting fasta from the BARRNAP out file\n";
+my $out011_barrnap_fas = File::Spec->catfile($dir011_barrnap, $bname ."_BARRNAp.rRNA.fasta"); 
+my @cmd02_bedtools = ($exepath{'bedtools'}, 'getfasta', '-fi', $genome, '-bed', $out011_barrnap);
+push(@cmd02_bedtools, '>', $out011_barrnap_fas); 
+my $cmd02_bedtools = join(" ", @cmd02_bedtools);
+my @cmd02run = run( command => $cmd02_bedtools, verbose => $opt_V );
+if (!$cmd02run[0]) {
+
+        die("\n\t\tERROR: $cmd02_bedtools run with the error:\n\t$cmd02run[2]->[0]\n");
+}
+print STDERR "\n\t\tFasta extracted from BARRNAP.\n\t\tOutput at $dir011_barrnap\n\n";
+
+## Run tRNASCAN
+
+print STDERR "\t1.2- Running tRNAScan-SE\n";
+
+my $dir012_tRNAScanSE = File::Spec->catfile($dir01_ncRNA, "012_tRNAScanSE");
+mkdir($dir012_tRNAScanSE) unless (-d $dir012_tRNAScanSE);
+my $out012_tRNAScanSE = File::Spec->catfile($dir012_tRNAScanSE, $bname ."_tRNAScanSE.tRNA");
+
+my @cmd03_tRNAScanSE = ($exepath{'tRNAscan-SE'});
+
+if (exists $program_args{'TRNASCANSE'}) {
+
+    foreach my $parg (sort keys  %{$program_args{'TRNASCANSE'}}) {
+
+        push(@cmd03_tRNAScanSE, ($parg, $program_args{'TRNASCANSE'}->{$parg}));
+    }
+}
+
+
+## Overwrite the output options
+my $trnas_fasta = $out012_tRNAScanSE . ".fasta";
+push(@cmd03_tRNAScanSE, ("--thread", $threads));
+push(@cmd03_tRNAScanSE, ("-o", $out012_tRNAScanSE . ".out.txt"));
+push(@cmd03_tRNAScanSE, ("-f", $out012_tRNAScanSE . ".structure.txt"));
+push(@cmd03_tRNAScanSE, ("-m", $out012_tRNAScanSE . ".stats.txt"));
+push(@cmd03_tRNAScanSE, ("-b", $out012_tRNAScanSE . ".bed"));
+push(@cmd03_tRNAScanSE, ("-a", $trnas_fasta));
+
+push(@cmd03_tRNAScanSE, $genome);
+
+## tRNAScan-SE may run iteractively if it finds the output file
+## so check and then skip it if they exists
+
+unless (-e $trnas_fasta) {
+
+    my $cmd03_tRNAScanSE = join(" ", @cmd03_tRNAScanSE);
+    my @cmd03run = run( command => $cmd03_tRNAScanSE, verbose => $opt_V );
+    if (!$cmd03run[0]) {
+
+        die("\n\t\tERROR: $cmd03_tRNAScanSE run with the error:\n\t$cmd03run[2]->[0]\n");
+    }
+    print STDERR "\n\t\ttRNAScan-SE finished.\n\t\tOutput at $dir012_tRNAScanSE\n\n";
+}
+else {
+
+    print STDERR "\n\t\ttRNAScan-SE out found at\n\t\t$trnas_fasta\n\t\tSkipping command run.\n\n";
+}
+
+if (!$opt_r) {
+
+    $trna_file = $trnas_fasta;
+}
+
+## Parse the bed file to extract a summary
+my %trna_c = ();
+open my $trna_io, '<', $out012_tRNAScanSE . ".bed";
+while (<$trna_io>) {
+
+    chomp($_);
+    if ($_ =~ m/.+/ && $_ !~ m/#/) {
+
+        my @line = split(/\t/, $_);
+        my @trna_line = split(/-/, $line[3]);
+        if (exists $trna_c{$trna_line[1]}) {
+
+            $trna_c{$trna_line[1]}++;
+        }
+        else {
+
+            $trna_c{$trna_line[1]} = 1;
+        }
+    }
+}
+print STDERR "\t\tSummary of predicted tRNA:\n";
+foreach my $trna (sort keys %trna_c) {
+
+    print STDERR "\t\t\t$trna\t$trna_c{$trna}\n";
+}
+
+
+
+##############################################################################
+## STEP 2: Run the Class I Repeat Annotation Tools
+##############################################################################
+
+print_header("2) Running Class I Repeat Annotation Tools tools");
+
+my $dir02_LTR = File::Spec->catfile($outdir, "02_ClassI_Annotation");
+mkdir($dir02_LTR) unless (-d $dir02_LTR);
+
+### Run LTR Harvest
+
+print STDERR "\t2.1- Running LTRHarvest\n";
+
+my $dir021_ltrharv = File::Spec->catfile($dir02_LTR, "021_LTRHarvest");
+mkdir($dir021_ltrharv) unless (-d $dir021_ltrharv);
+
+## LTR Harvest needs to run in several steps:
+## 1- Indexing of the fasta genome
+## 2- Run of the ltrharvest
+## 3- Sorting of the GFF
+## 4- Extracting of the LTR features with ltrdigest
+
+print STDERR "\n\t\t2.1.1- Indexing the $genome file with gt suffixerator.\n";
+
+my @cmd04_ltrharv01 = ($exepath{'gt'}, 'suffixerator');
+if (exists $program_args{'GT::SUFFIXERATOR'}) {
+
+    foreach my $parg (sort keys  %{$program_args{'GT::SUFFIXERATOR'}}) {
+
+        push(@cmd04_ltrharv01, ($parg, $program_args{'GT::SUFFIXERATOR'}->{$parg}));
+    }
+}
+
+## Add the -db
+push(@cmd04_ltrharv01, ('-db', $genome));
+
+## Add the output index
+my $out021_suffidx = File::Spec->catfile($dir021_ltrharv, $bname . ".gt_suff.idx");
+push(@cmd04_ltrharv01, ('-indexname', $out021_suffidx));
+
+## Then add a list of default options
+my @cmd04_defopts = ('-tis', '-suf', '-lcp', '-des', '-ssp');
+foreach my $defopt (@cmd04_defopts) {
+
+    push(@cmd04_ltrharv01, $defopt);
+} 
+
+## No threads option
+my $cmd04_ltrharv01 = join(" ", @cmd04_ltrharv01);
+my @cmd04run = run( command => $cmd04_ltrharv01, verbose => $opt_V );
+if (!$cmd04run[0]) {
+
+        die("\n\t\tERROR: $cmd04_ltrharv01 run with the error:\n\t$cmd04run[2]->[0]\n");
+}
+print STDERR "\n\t\tIndexing finished.\n\t\tOutput at $dir021_ltrharv\n\n";
+
+## Step 2
+print STDERR "\n\t\t2.1.2- Running ltrharvest.\n";
+
+my @cmd05_ltrharv02 = ($exepath{'gt'}, 'ltrharvest');
+
+my %ltrharv_defs = (
+    '-minlenltr'  => 100,
+    '-maxlenltr'  => 6000,
+    '-mindistltr' => 1500,
+    '-maxdistltr' => 25000,
+    '-mintsd'     => 5,
+    '-maxtsd'     => 5,
+    '-motif'      => "tgca",
+    '-similar'    => 99,
+    '-vic'        => 10
+);
+
+if (exists $program_args{'GT::LTRHARVEST'}) {
+
+    foreach my $parg (sort keys  %{$program_args{'GT::LTRHARVEST'}}) {
+
+	if (exists $ltrharv_defs{$parg}) {
+
+	    $ltrharv_defs{$parg} = $program_args{'GT::LTRHARVEST'}->{$parg};
+        }
+        else {
+
+            push(@cmd05_ltrharv02, ($parg, $program_args{'GT::LTRHARVEST'}->{$parg}));
+        }
+    }
+}
+
+## Add the defaults
+foreach my $ltrharv_def (sort keys %ltrharv_defs) {
+
+    push(@cmd05_ltrharv02, ($ltrharv_def, $ltrharv_defs{$ltrharv_def}));
+}
+
+## Add the -index
+push(@cmd05_ltrharv02, ('-index', $out021_suffidx));
+
+## Add the outfiles
+my $out021_ltrharv_b = File::Spec->catfile($dir021_ltrharv, $bname . ".ltrharvest");
+my %ltrharv_outs = (
+    '-out'      => $out021_ltrharv_b.".out.txt",
+    '-outinner' => $out021_ltrharv_b.".innerout.txt",
+    '-gff3'     => $out021_ltrharv_b.".gff"
+);
+foreach my $ltrharv_out (sort keys %ltrharv_outs) {
+
+    push(@cmd05_ltrharv02, ($ltrharv_out, $ltrharv_outs{$ltrharv_out}));
+}
+
+## The final output
+push(@cmd05_ltrharv02, ('>', $out021_ltrharv_b.".results.txt"));
+
+## And run
+my $cmd05_ltrharv02 = join(" ", @cmd05_ltrharv02);
+my @cmd05run = run( command => $cmd05_ltrharv02, verbose => $opt_V );
+if (!$cmd05run[0]) {
+
+        die("\n\t\tERROR: $cmd05_ltrharv02 run with the error:\n\t$cmd05run[2]->[0]\n");
+}
+print STDERR "\n\t\tLtrharvest run finished.\n\t\tOutput at $dir021_ltrharv\n\n";
+
+my ($ltrharv_c, $ltrharv_min, $ltrharv_max) = (0, 1000000000, 0);
+if (-s $out021_ltrharv_b.".gff") {
+
+    open my $ltrharv_io, '<', $out021_ltrharv_b.".results.txt";
+    while(<$ltrharv_io>) {
+
+        chomp($_);
+        unless ($_ =~ m/#/) {
+
+            my @line = split(/\s+/, $_);
+            $ltrharv_c++;
+            if ($ltrharv_min >= $line[2]) {
+
+                $ltrharv_min = $line[2];
+            }
+	    if ($ltrharv_max <= $line[2]) {
+
+                $ltrharv_max = $line[2];
+            }
+        }
+    }
+
+    print STDERR "\t\tSummary of predicted LTR by ltrharvest:\n";
+    print STDERR "\t\t\tNumber of LTR predicted:\t$ltrharv_c\n";
+    print STDERR "\t\t\tMinimum LTR size:\t$ltrharv_min\n";
+    print STDERR "\t\t\tMaximum LTR size:\t$ltrharv_max\n";
+
+    ## Step 3: Check for elements with PPT (poly purine tract) or PBS (primer binding site)
+    ## This is based on: http://weatherby.genetics.utah.edu/MAKER/wiki/index.php/Repeat_Library_Construction-Advanced
+
+    print STDERR "\n\t\t2.1.3- Checking for PPT and PBS elements\n";
+
+    my @cmd06_ltrharv03 = ($exepath{'gt'}, 'gff3', '-sort', $out021_ltrharv_b.".gff", '>', $out021_ltrharv_b.".sorted.gff");
+    my $cmd06_ltrharv03 = join(" ", @cmd06_ltrharv03);
+    my @cmd06run = run( command => $cmd06_ltrharv03, verbose => $opt_V );
+    if (!$cmd06run[0]) {
+
+            die("\n\t\tERROR: $cmd06_ltrharv03 run with the error:\n\t$cmd06run[2]->[0]\n");
+    }
+
+    ## As tRNA file it will use the tRNA predicted by tRNAScanSE
+    my @cmd07_ltrharv03 = ($exepath{'gt'}, 'ltrdigest', '-trnas', $trna_file, $out021_ltrharv_b.".sorted.gff", $out021_suffidx);
+    push(@cmd07_ltrharv03, ('>', $out021_ltrharv_b.".dgt"));
+    my $cmd07_ltrharv03 = join(" ", @cmd07_ltrharv03);
+    my @cmd07run = run( command => $cmd07_ltrharv03, verbose => $opt_V );
+    if (!$cmd07run[0]) {
+
+        die("\n\t\tERROR: $cmd07_ltrharv03 run with the error:\n\t$cmd07run[2]->[0]\n");
+    }
+
+    ## Once the LTR features has been digested it will look for "primer_binding_site" (PBS)
+    ## or "RR_tract" (PPT) close to the LTR. A complete transposons will look like:
+    ## LTR{<20bp}PBS{X bp}PPT{<20bp}LTR
+
+    my $switch_LTR = 0;
+    my %allowed_traits = (
+        "long_terminal_repeat" => 2,
+        "primer_binding_site"  => 1,
+        "RR_tract"             => 1
+    );
+    my %complete_ltr = (
+	"long_terminal_repeat-primer_binding_site-long_terminal_repeat" => 0,
+	"long_terminal_repeat-primer_binding_site-RR_tract-long_terminal_repeat" => 0,
+	"long_terminal_repeat-RR_tract-long_terminal_repeat" => 0	
+    );
+
+    my %selltr_byseq = ();
+    my @buffer_ltr = ();
+    my @struct_ltr = ();
+    my @header = ();
+    open my $dgt_io, '<', $out021_ltrharv_b.".dgt";
+    while(<$dgt_io>) {
+
+        chomp($_);
+        if ($_ =~ m/^#/) {
+
+	    if ($_ !~ m/#$/) {
+
+                push(@header, $_);
+            }
+        }
+        else {
+
+            my @line = split(/\t/, $_);
+            my %feats = ();
+            foreach my $f (split(/;/, $line[8])) {
+
+                if ($f =~ m/^(.+)=(.+)$/) {
+
+                    $feats{$1} = $2;
+                }
+            }
+            $line[8] = \%feats;
+
+            ## Fill the transposon buffer 
+            if ($line[2] =~ m/LTR_retrotransposon/ && scalar(@buffer_ltr) == 0) {
+
+                push(@buffer_ltr, \@line);
+            }
+	    else {
+
+                my $ltr_id = '';
+                ## If the transposon buffer is not empty, get the ID
+                if (scalar(@buffer_ltr) > 0) {
+
+                    $ltr_id = $buffer_ltr[0]->[8]->{"ID"};
+		    my $seqid = $buffer_ltr[0]->[0];
+                
+                    if ($feats{"Parent"} eq $ltr_id) {
+ 
+                        if (exists $allowed_traits{$line[2]}) { 
+
+               		    push(@buffer_ltr, \@line);
+                            push(@struct_ltr, $line[2]);
+                        }
+
+                        ## Check now the structure
+                        my $ltr_structure = join("-", @struct_ltr);
+	                if (exists $complete_ltr{$ltr_structure}) {
+			    
+		            ## Check the distance
+                            my $distance_req = 0;
+
+			    ## Calculate different parameters
+                            my $ltr5p_en = $buffer_ltr[1]->[4];
+                            my $ltr3p_st = $buffer_ltr[-1]->[3];
+                            my $middle_st = $buffer_ltr[2]->[3];
+			    my $middle_en = $buffer_ltr[-2]->[4];
+                            my $dist01 = $middle_st - $ltr5p_en;
+			    my $dist02 = $ltr3p_st - $middle_en;
+
+			    ## Three possibilities:
+			    ## 1- LTR-{<20bp}-PBS-LTR
+			    if ($ltr_structure eq "long_terminal_repeat-primer_binding_site-long_terminal_repeat") {
+			     
+	                        if ($dist01 <= 20) {
+
+				    $distance_req = 1;
+				}
+			    }
+			
+			    ## 2- LTR-PPT-{<20bp}-LTR
+			    elsif ($ltr_structure eq "long_terminal_repeat-RR_tract-long_terminal_repeat") {
+
+				if ($dist02 <= 20) {
+
+				    $distance_req = 1;
+				}
+			    }
+
+			    ## 3- LTR-{<20bp}-PBS-{X bp}-PPT-{<20bp}-LTR
+			    else {
+
+				if ($dist01 <= 20 && $dist02 <= 20) {
+
+                                    $distance_req = 1;
+                                }
+                            }
+
+			    if ($distance_req == 1) {
+
+				## Add as note the structure of the LTR
+				$buffer_ltr[0]->[8]->{"Note"} = "LTR_Structure:".$ltr_structure;
+
+       				$complete_ltr{$ltr_structure}++;
+				my @new_array = @buffer_ltr;
+                                if (exists $selltr_byseq{$seqid}) {
+                                
+   				    push(@{$selltr_byseq{$seqid}}, \@new_array); 
+				}
+				else {
+
+		                    $selltr_byseq{$seqid} = [\@new_array];
+				}
+			        @buffer_ltr = ();
+                            }
+                        }
+                    }
+                    else {
+     
+                        ## Delete the buffer
+                        @buffer_ltr = ();
+                    }		    
+		}                     
+	    }
+        }
+    }
+
+    my $out021_ltrharv_f01 = $out021_ltrharv_b.".ltr_elements_complete.gff";
+    ltrarrays2gff($out021_ltrharv_f01, \@header, \%selltr_byseq);    
+
+    print STDERR "\n\t\tSummary of the complete LTR screening\n";
+    foreach my $cltr (sort keys %complete_ltr) {
+    
+        print STDERR "\t\t\t$cltr\t$complete_ltr{$cltr}\n";
+    }
+
+    ## Once the complete LTR file has been generated it will filter
+    ## the possible repeats based in the following conditions:
+    ## 1- Gaps with more than 50 N's up and downstream the LTR elements
+    ## 2- Retrieve of 50 bp of the LTR borders, if they match, they will be discarded.
+
+    print STDERR "\n\t\t2.1.4- Filtering possible false positives derived from tandems\n";
+
+    my %filltr_byseq = ();
+    my $ltr_falsepositives = 0;
+
+    ## Create a directory to store the sequences of the LTRs
+
+    my $dir0211_ltrharv_flank = File::Spec->catfile($dir021_ltrharv, "LTRHarvest_FlankSeqs");
+    mkdir($dir0211_ltrharv_flank) unless (-d $dir0211_ltrharv_flank);
+
+    my $seq_c = 0;
+    my $genomeseq_io = Bio::SeqIO->new( -format => "fasta", -file => "$genome" );
+    while( my $seqobj = $genomeseq_io->next_seq() ) {
+
+        my $seqid = $seqobj->id();
+	my $seqlen = $seqobj->length();
+
+	## LTRHarvest change thenames of the sequences s seq + seq.number
+	my $ltrharv_seqid = "seq" . $seq_c;
+	$seq_c++;
+
+        if (exists $selltr_byseq{$ltrharv_seqid}) {
+
+            foreach my $ltr_array (@{$selltr_byseq{$ltrharv_seqid}}) {
+
+		my $ltr_id = $ltr_array->[0]->[8]->{"ID"};
+		my $flankseqfile = File::Spec->catfile($dir0211_ltrharv_flank, $ltr_id."_flanks.fasta");
+
+	        my $ltr5p_en = $ltr_array->[1]->[3];
+		my $ltr3p_st = $ltr_array->[-1]->[4];
+		my $ltr5p_st = $ltr5p_en - 50;
+		if ($ltr5p_st < 1) {
+
+		    $ltr5p_st = 1;
+		}
+                my $ltr3p_en = $ltr3p_st + 50;
+		if ($ltr3p_en > $seqlen) { 
+
+                    $ltr3p_en = $seqlen; 
+                }
+		
+		my $downstream50bp = $seqobj->subseq($ltr5p_st, $ltr5p_en);
+		my $upstream50bp = $seqobj->subseq($ltr3p_st, $ltr3p_en);
+
+		open my $seqfh, '>', $flankseqfile;
+		print $seqfh ">$ltr_id.$seqid:$ltr5p_st..$ltr5p_en\n";
+		print $seqfh "$downstream50bp\n";
+		print $seqfh ">$ltr_id.$seqid:$ltr3p_st..$ltr3p_en\n";
+		print $seqfh "$upstream50bp\n";
+
+		## Once the sequence has been created, it will run muscle
+		## and analyze the ourput
+
+		my $flankalign = File::Spec->catfile($dir0211_ltrharv_flank, $ltr_id."_flanks.clw");
+		my @cmd08_muscle = ($exepath{'muscle'}, '-in', $flankseqfile, '-out', $flankalign, '-clwstrict');
+	   	my $cmd08_muscle = join(" ", @cmd08_muscle);
+    		my @cmd08run = run( command => $cmd08_muscle, verbose => $opt_V );
+    		if (!$cmd08run[0]) {
+
+            	    die("\n\t\tERROR: $cmd08_muscle run with the error:\n\t$cmd08run[2]->[0]\n");
+    		}
+
+		## Open the alignment with Bio::AlignIO and get the % of identity
+		my $alignio = Bio::AlignIO->new( -format => "clustalw", -file => $flankalign );
+	
+		while(my $alignobj = $alignio->next_aln()) { 
+	
+		    my $ident = $alignobj->percentage_identity();
+		    my $conserv_nt = 0;
+                    my @conse_perc = $alignobj->consensus_conservation();
+		    foreach my $cperc (@conse_perc) {
+
+			if ($cperc == 100) {
+
+			    $conserv_nt++;
+			}
+		    }
+
+		    ## The LTR will be filtered out if the % of identity is >60% 
+		    ## and more than 25 nt are identical
+
+		    if ($ident <= 60 && $conserv_nt <= 25) {
+
+			if (exists $filltr_byseq{$seqid}) {
+
+			    push($filltr_byseq{$seqid}, $ltr_array);
+			}
+			else {
+
+			    $filltr_byseq{$seqid} = [$ltr_array];
+			}
+		    }
+		    else {
+
+			$ltr_falsepositives++;
+		    }
+		}
+	    }     
+        }
+    }
+    if ($ltr_falsepositives == 0) {
+	
+	print STDERR "\n\t\tNo false positives LTR were found.\n";
+    }
+    else {
+
+    	print STDERR "\n\t\t$ltr_falsepositives LTR false positives have been filtered out.\n";
+    }
+
+    my $out021_ltrharv_f02 = $out021_ltrharv_b.".ltr_elements_complete_filtered.gff";
+    ltrarrays2gff($out021_ltrharv_f02, \@header, \%filltr_byseq);
+
+}
+else {
+
+    print STDERR "\t\tNo LTR where prediced with ltrharvest.\n";
+}
+
+######
+
+print STDERR "\n\t2.2- Running LTRFinder\n";
+
+my $dir022_ltrfinder = File::Spec->catfile($dir02_LTR, "022_LTRFinder");
+mkdir($dir022_ltrfinder) unless (-d $dir022_ltrfinder);
+
+## LTR Finder Runs in one step
+
+my @cmd08_ltrfinder = ($exepath{'ltr_finder'});
+if (exists $program_args{'LTRFINDER'}) {
+
+    foreach my $parg (sort keys  %{$program_args{'LTRFINDER'}}) {
+
+        push(@cmd08_ltrfinder, ($parg, $program_args{'LTRFINDER'}->{$parg}));
+    }
+}
+
+## Overwrite some parameters
+push(@cmd08_ltrfinder, ('-t', $trna_file, '-a', $ENV{'PFSCAN_DIR'}, $genome));
+
+## Add the output index
+my $out022_ltrfinder_out = File::Spec->catfile($dir022_ltrfinder, $bname . ".ltrfinder.out.txt");
+push(@cmd08_ltrfinder, ('>', $out022_ltrfinder_out));
+
+## No threads option
+## Check if the output file exists, if it does, skip the run because it takes some time
+
+if (-e $out022_ltrfinder_out) {
+
+    print STDERR "\n\t\tLTRFinder out found as:\n\t\t$out022_ltrfinder_out\n\t\tSkipping run.\n";
+}
+else {
+
+    my $cmd08_ltrfinder = join(" ", @cmd08_ltrfinder);
+    my @cmd08run = run( command => $cmd08_ltrfinder, verbose => $opt_V );
+    if (!$cmd08run[0]) {
+
+        die("\n\t\tERROR: $cmd08_ltrfinder run with the error:\n\t$cmd08run[2]->[0]\n");
+    }
+}
+
+
+## Parse the LTRFinder output
+my ($seqidsizes_aref, $ltrfinderparsed_href) = parse_ltrfinder_fullout($out022_ltrfinder_out);
+
+## Create the header
+my @ltrfinder_header = ('##gff-version 3');
+foreach my $seqinfo_aref (@{$seqidsizes_aref}) {
+
+    push(@ltrfinder_header, '##sequence-region '.$seqinfo_aref->[0]." 1 ".$seqinfo_aref->[1]); 
+}
+
+my $out022_ltrfinder_gff = File::Spec->catfile($dir022_ltrfinder, $bname . ".ltrfinder.gff");
+ltrarrays2gff($out022_ltrfinder_gff, \@ltrfinder_header, $ltrfinderparsed_href);
+
+my $ltrfinder_c = 0;
+foreach my $seqid (sort keys %{$ltrfinderparsed_href}) {
+
+   $ltrfinder_c += scalar(@{$ltrfinderparsed_href->{$seqid}})
+}
+
+if ($ltrfinder_c> 0) {
+
+    print STDERR "\n\t\t$ltrfinder_c LTR were found.\n";
+}
+else{
+
+    print STDERR "\n\t\tNo LTR elements were found.\n";
+}
+
+
+#########################################################
+
+print STDERR "\n\t2.3- Running MGEScan\n";
+
+my $dir023_mgescan = File::Spec->catfile($dir02_LTR, "023_MGEScan");
+mkdir($dir023_mgescan) unless (-d $dir023_mgescan);
+
+## Note this program uses a dir as the input of the genome and then it
+## reads the seqs inside. So this will create a genome file and 
+## copy the genome there
+my $dir00_genome = File::Spec->catfile($outdir, "00_Genome");
+mkdir($dir00_genome) unless (-d $dir00_genome);
+copy($genome, $dir00_genome);
+
+## Note, the mpi version that the program is using doesn't work
+## so this program will be run with just one single core.
+
+my @cmd09_mgescan = ($exepath{'mgescan'}, "both", $dir00_genome, "--output", $dir023_mgescan);
+if (exists $program_args{'MGESCAN'}) {
+
+    foreach my $parg (sort keys  %{$program_args{'MGESCAN'}}) {
+
+        push(@cmd09_mgescan, ($parg, $program_args{'MGESCAN'}->{$parg}));
+    }
+}
+
+## And run
+my $cmd09_mgescan = join(" ", @cmd09_mgescan);
+my @cmd09run = run( command => $cmd09_mgescan, verbose => $opt_V );
+if (!$cmd09run[0]) {
+
+    die("\n\t\tERROR: $cmd09_mgescan run with the error:\n\t$cmd09run[2]->[0]\n");
+}
+
+
+
+
+
+#########################################################
+
+print STDERR "\n\t2.4- Running LTRRetriever\n";
+
+my $dir024_ltrretriever = File::Spec->catfile($dir02_LTR, "024_LTRRetriever");
+mkdir($dir024_ltrretriever) unless (-d $dir024_ltrretriever);
+
+## Because LTRRetriever may affect the genome file it will copy
+## a copy into the LTRRetriever dir.
+
+my $genome_copy = File::Spec->catfile($dir024_ltrretriever, $bname.".fasta");
+copy($genome, $genome_copy);
+
+## LTR Retriever will produce a serie of files using the $genome_copy basename
+my %ltrretriver_outs = (
+    "IntactLTR_All"       => $genome_copy.".mod.pass.list",
+    "IntactLTR_NonTGCA"   => $genome_copy.".mod.nmtf.pass.list",
+    "IntactLTR_All_GFF"   => $genome_copy.".mod.pass.list.gff3",
+    "LibLTR_Redundant"    => $genome_copy.".mod.LTRlib.redundant.fa",
+    "LibLTR_NonRedundant" => $genome_copy.".mod.LTRlib.fa",
+    "LibLTR_NonTGCA"      => $genome_copy.".mod.nmtf.LTRlib.fa",
+    "AnnotationLTR_GFF"   => $genome_copy.".mod.out.gff",
+    "AnnotationLTR_Fam"	  => $genome_copy.".mod.out.fam.size.list",
+    "AnnotationLTR_Sup"   => $genome_copy.".mod.out.superfam.size.list"
+);
+
+## LTR Retriever Runs in one step
+my @cmd10_ltrretriever = ($exepath{'LTR_retriever'});
+if (exists $program_args{'LTRRETRIEVER'}) {
+
+    foreach my $parg (sort keys  %{$program_args{'LTRRETRIEVER'}}) {
+
+        push(@cmd10_ltrretriever, ($parg, $program_args{'LTRRETRIEVER'}->{$parg}));
+    }
+}
+
+## Overwrite some parameters
+push(@cmd10_ltrretriever, ('-genome', $genome_copy));
+push(@cmd10_ltrretriever, ('-inharvest', $out021_ltrharv_b.".results.txt"));
+push(@cmd10_ltrretriever, ('-infinder', $out022_ltrfinder_out));
+push(@cmd10_ltrretriever, ('-threads', $threads));
+
+## Run LTRRetriever
+my $cmd10_ltrretriever = join(" ", @cmd10_ltrretriever);
+my @cmd10run = run( command => $cmd10_ltrretriever, verbose => $opt_V );
+if (!$cmd10run[0]) {
+
+    die("\n\t\tERROR: $cmd10_ltrretriever run with the error:\n\t$cmd10run[2]->[0]\n");
+}
+
+## After the running LTR_Retriever will create three files in the working dir
+## Tpases020812DNA<and_a_number>
+## Tpases020812LINE.<and_a_number>
+## alluniRefprexp082813.<and_a_number>
+## It will move them to the LTR_Retriever dir
+run( command => "mv Tpases* $dir024_ltrretriever", verbose => $opt_V);
+run( command => "mv alluniRefprexp* $dir024_ltrretriever", verbose => $opt_V);
+run( command => "mv LTRretriever* $dir024_ltrretriever", verbose => $opt_V);
+
+
+## Now it will parse the summary ("AnnotationLTR_Sup") to print some stats
+
+open my $ltrrsum_fh, '<', $ltrretriver_outs{"AnnotationLTR_Sup"};
+print STDERR "\n\t\tLTRRetriever Summary\n";
+while(<$ltrrsum_fh>) {
+
+    chomp($_);
+    my @fline = ();
+    foreach my $item (split(/\s+/, $_)) {
+
+        $item =~ s/^0+//;
+	push(@fline, sprintf("% 10s", $item));
+    }	
+    my $pline = join(" ", @fline);
+    print STDERR "\t\t$pline\n";
+}
+
+
+##############################################################################
+## STEP 3: Run Tools to Annotate Class II Repeats
+##############################################################################
+
+print_header("3) Running Class II Repeats Annotation tools");
+
+my $dir03_LTR = File::Spec->catfile($outdir, "03_TE_ClassII_Annotation");
+mkdir($dir03_LTR) unless (-d $dir03_LTR);
+
+### Run LTR Harvest
+
+
+
+
+
+
+
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GREAT Ends ($date)   ##\n";
+print STDERR "############################################################\n\n";
+exit;
+
+
+##############################################################################
+##############################################################################
+##
+## FUNCTIONS
+##
+###############################################################################
+## function to print the script help
+###############################################################################
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    GREAT - Genomic Repetitive Element Annotation Tool
+
+    Description:
+
+      The Genomic Repetitive Elements Annotation Pipeline (GREAT)
+     is a Perl pipeline designed to combine different tools and 
+     programs to annotate repetitive elements.
+
+      This pipeline can annotate the following elements:
+
+      * Transposons
+        + Class I:
+          - LTR: LTR/Copia, LTR/Gypsy and ERV
+          - Non-LTR: LINE and SINE
+        + Class II: (...working process...)
+          - TIRs Order
+          - Helitron Order
+          - Maverick Order
+        + MITEs
+      * NUPTs and NUMTs (...working process))
+      * Satellite DNA (e.g. telomeres and centromeres)
+      * rDNA and tDNA
+
+     For a more complete information please use perldoc
+     as "perldoc GREAT".
+
+    Synopsis:
+    
+      GREAT [-h][-v] -g <genomic_sequence> -o <outdir>
+                [-t <threads>] [-r <tRNA_fasta>]
+                [-p <pass_argument_to_program>]
+                [-s <run_steps>]
+
+
+    Example of run:
+        
+      ./GREAT -g TAIR10_chr1.fas -o test01 -p "MITEFINDER:[threshold=0.7]" -t 60
+
+    Flags:
+  
+      -g genomic_sequence      genomic sequence in FASTA format (mandatory)
+      -o outdir                name of the out directory (mandatory)
+      -t threads               number of threads (default: 1)
+      -p pass_argument         pass argument to program (optional-see details)
+      -r tRNA_fasta            fasta file with tRNA sequences (optional)
+      -s run_steps             run only the steps specified in this list (optional, default all)
+      -P print_program_names   print the program names available for the -p option
+      -V be_verbose            be verbose and print the parsing status.
+      -v version               print version
+      -h help                  print this help
+
+
+
+EOF
+exit (1);
+}
+
+
+##############################################################################
+## Just a simple function to print a message with some format
+##############################################################################
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+##############################################################################
+## function: parse_program_args
+## 1- check if it is a parseable line (contains colons ":" and "[]") or it is
+##    a file.
+## 2- Parse the following for format
+##    PROGRAM_NAME::SUBPROGRAM:[ARG1=VALUE1][ARG2];
+## 3- Return a hash with the following structure:
+##    key=program_name or program_name:subprogram_name
+##    value=hashref as {arg => val} or {arg => ''}
+##
+## E.g: my %program_args = parse_program_args(\%avail_programs, $opt_p);
+###############################################################################
+
+sub parse_program_args {
+    my $avprograms = shift;
+    my $feed = shift;
+
+    my %avail_programs = %{$avprograms};
+    my %pargs = ();
+    if ($feed) {
+        if ($feed =~ m/:/) {
+
+            print STDERR "\n\t-p argument is a parseable line.\n";
+            my @args = split(/;/, $feed);
+	    foreach my $arg (@args) {
+
+		my %subargs = ();
+            	if ($arg =~ m/^(.+):(.+)$/) {
+
+		    my $program = $1;
+		    unless (exists $avail_programs{$program}) {
+
+		        my $error = "ERROR: $program is not available in the list of available programs.";
+			$error .= "\n\tPlease use option -P for more details.";
+			die("\n\t$error\n\n");
+		    }
+		    my $argline = $2;
+		    $argline =~ s/\]\[/\];\[/g;
+		    foreach my $sarg (split(/;/, $argline)) {
+		        if ($sarg =~ m/^\[(.+)\]$/) {
+
+			    my $parg = $1;
+			    if ($parg =~ m/^(.+)=(.+)$/) {
+			
+			    	$subargs{$1} = $2;
+			    }
+			    else {
+			
+			    	$subargs{$parg} = '';
+			    }
+		        }
+		        else {
+
+			    die("\n\tPARSING ERROR: arguments should be between square brackets []\n");
+		        }
+                    }
+		    $pargs{$program} = \%subargs;
+		}
+		else {
+
+		    die("\n\tPARSING ERROR: program names should end in a colon (e.g. PROGRAM:)\n");
+		}
+            }
+        }
+        else {
+
+            print STDERR "\n\t-p argument is a parseable file.\n";
+
+        }
+    }
+
+    return(%pargs);
+}
+
+##############################################################################
+## function: ltrarrays2gff()
+## function to write a gff file when the data structure has been stored
+## as:
+## $filename  - Filename
+## @header    - Header array, one element per row
+## %body      - Hash where key=seqid and value=LTR is an array ref
+##  $arrayref - Each element is a GFF arrayref of an element of the LTR
+##    $gffref - Each element is a column of the GFF line except column 9
+##              that it is a hash ref. with key=type, value=value.
+## E.g: ltrarrays2gff($filename, \@header, \%body);
+###############################################################################
+
+
+sub ltrarrays2gff {
+    my $filename = shift;
+    my $header_aref = shift;
+    my $body_href = shift;
+
+    my @header = @{$header_aref};
+    my %ltr_arrays = %{$body_href};
+
+    ## Now generate a new gff file
+    
+    open my $ltrgff_io, '>', $filename;
+    
+    foreach my $h (@header) {
+  
+        print $ltrgff_io "$h\n";
+    }
+    foreach my $seqid (sort keys %ltr_arrays) {
+
+	foreach my $ltr_array (@{$ltr_arrays{$seqid}}) {
+
+	    foreach my $ele (@{$ltr_array}) {
+
+                my @nline = @{$ele};
+	        my @nfeats = ();
+        
+                foreach my $f (sort keys %{$nline[8]}) {
+
+    	            push(@nfeats, $f."=".$nline[8]->{$f});
+                }
+                $nline[8] = join(";", @nfeats);
+                my $pline = join("\t", @nline);
+                print $ltrgff_io "$pline\n";
+            }
+        } 
+    } 
+}
+
+
+##############################################################################
+## function: parse_ltrfinder_fullout()
+## function to parse the full ltrfinder output, retrieving two arrayrefs
+## that it can be passed to the ltrarrays2gff to print a GFF file
+## Input: Filename  - Filename
+## Output: \@header, \%body array and hash refs (see ltrarrays2gff function 
+##         for the details about the structure)
+## my ($header_aref, $body_href) = parse_ltrfinder_fullout($ltrfinder_output);
+###############################################################################
+
+sub parse_ltrfinder_fullout {
+    my $filename = shift; 
+
+    unless (-e $filename) {
+
+        die("\nERROR parse_ltrfinder_fullout: $filename does not exists.\n");
+    }
+
+    ## Open the filehandle
+    open my $fhio, '<', $filename;
+
+    ## Define the catching variables
+    my %ltrcatch = ();
+    my @seqidsizes = ();
+
+    ## Define the switches
+    my ($curr_seqid, $curr_ltrid) = ('', '');
+
+    ## Define the counter
+    my $ltrfinder_c = 0;
+
+    ## Process the filehandle
+    while(<$fhio>) {
+
+        chomp($_);
+
+        ## Define an index to retrieve the last arrayref
+        my $last_idx = '';
+        if ($curr_seqid =~ m/.+/) {
+
+            $last_idx = scalar(@{$ltrcatch{$curr_seqid}}) - 1;
+        }
+
+        ## Match and extract conditionals
+    	if ($_ =~ m/^>Sequence:\s+(.+)\s+Len:(\d+)$/) {
+
+	    my $seqid = $1;
+	    my $seqlen = $2;
+	    push(@seqidsizes, [$seqid, $seqlen]);
+        }
+        elsif ($_ =~ m/^\[\d+\]\s+(.+)\s+Len:\d+/) {
+
+            my $seqid = $1;
+            $ltrfinder_c++;
+
+	    ## Define the parent terms and then the children
+  	    ## LTR_Finder produces the following elements:
+	    ## TSR, LTR, PBS, PPT and  Domains(IN, RT, RH)
+
+	    ## The sequencing ontology terms that the program will use are:
+	    ## Root term: "transposable_element" (SO:0000101)
+            ## Derived terms:
+            ##   * "target_site_duplication" (SO:0000434) equiv. to TSR for LTRFinder
+            ##   * "transposable_element_gene" (SO:0000111) equiv. to Domains for LTRFinder
+            ##   * "retrotransposon" (SO:0000180) equiv. to Location for LTRFinder
+            ##      * "LTR_retrotransposon" (SO:0000186) equiv. to Location for LTRFinder
+            ##         * "long_terminal_repeat" (SO:0000286) equiv. to 5'-LTR and 3'-LTR for LTRFinder
+            ##         * "primer_binding_site" (SO:0005850) equiv. to PBS for LTRFinder
+            ##         * "RR_tract" (SO:0000435) equiv. to PPT for LTRFinder
+            ##         * "U_box" (SO:0001788) not predicted by LTRFinder
+
+	    ## Add the first items
+	    ## including the IDs
+
+   	    my @gff_te = ($seqid, "LTRFinder", "transposable_element", "", "", "", "", "", {});
+	    $gff_te[8]->{"ID"} = "TE" . sprintf("%09s", $ltrfinder_c);
+
+	    my @gff_rt = ($seqid, "LTRFinder", "retrotransposon", "", "", "", "", "", {});
+	    $gff_rt[8]->{"ID"} = "RT" . sprintf("%09s", $ltrfinder_c);
+	    $gff_rt[8]->{"Parent"} = $gff_te[8]->{"ID"};
+
+	    my @gff_ltr = ($seqid, "LTRFinder", "LTR_retrotransposon", "", "", "", "", "", {});
+            $gff_ltr[8]->{"ID"} = "LTR_RT" . sprintf("%09s", $ltrfinder_c);
+            $gff_ltr[8]->{"Parent"} = $gff_rt[8]->{"ID"};
+	    $curr_ltrid = $gff_ltr[8]->{"ID"};
+
+            if (exists $ltrcatch{$seqid}) {
+
+	        push(@{$ltrcatch{$seqid}}, [\@gff_te, \@gff_rt, \@gff_ltr]);
+            }
+	    else {
+
+                $ltrcatch{$seqid} = [[\@gff_te, \@gff_rt, \@gff_ltr]];
+            }
+            $curr_seqid = $seqid;
+        }
+        elsif ($_ =~ m/^Location\s+:\s+(\d+)\s+-\s+(\d+)\s+Len:\s+\d+\s+Strand:(.)/) {
+
+            ## Add start, end and strand to RT and LTR_RT
+
+	    foreach my $i ((0, 1, 2)) { 
+
+		$ltrcatch{$curr_seqid}->[$last_idx]->[$i]->[3] = $1;
+		$ltrcatch{$curr_seqid}->[$last_idx]->[$i]->[4] = $2;
+		$ltrcatch{$curr_seqid}->[$last_idx]->[$i]->[6] = $3;
+	    }
+        }
+        elsif ($_ =~ m/^Score\s+:\s+(\d+)\s+\[(.+)\]$/) {
+
+            ## Add the score and the similarity region
+	    foreach my $i ((0, 1, 2)) {
+
+	        $ltrcatch{$curr_seqid}->[$last_idx]->[$i]->[5] = $1;
+	    }
+
+            my $note = $2;
+            $note =~ s/\s+/_/g;
+            $ltrcatch{$curr_seqid}->[$last_idx]->[0]->[8]->{"Note"} = $note;
+        }
+        elsif ($_ =~ m/^Status\s+:\s+(.+)$/) {
+
+	    $ltrcatch{$curr_seqid}->[$last_idx]->[0]->[8]->{"Note"} .= ",Status:$1";
+        }
+        elsif ($_ =~ m/^(\d+)\'-LTR\s+:\s+(.+)\s+-\s+(.+)\s+Len:\s+\d+$/) {
+
+	    my @gffline = ($curr_seqid, "LTRFinder", "long_terminal_repeat", $2, $3, ".", "?", ".");
+	    my $element_id = $curr_ltrid . ":LTR" . $1 . "prime";
+	    push(@gffline, { "ID" => $element_id, "Parent" => $curr_ltrid });
+  	    push(@{$ltrcatch{$curr_seqid}->[$last_idx]}, \@gffline);
+        }
+        elsif ($_ =~ m/^TSR\s+:\s+(\d+)\s+-\s+(\d+)\s+,\s+(\d+)\s+-\s+(\d+)\s+\[(.+)\]$/) {
+
+	    my @gffline1 = ($curr_seqid, "LTRFinder", "target_site_duplication", $1, $2, ".", "?", ".");
+	    my @gffline2 = ($curr_seqid, "LTRFinder", "target_site_duplication", $3, $4, ".", "?", ".");
+
+            my $te_id = $ltrcatch{$curr_seqid}->[$last_idx]->[0]->[8]->{"ID"};
+	    push(@gffline1, {"Parent" => $te_id, "ID" => $te_id . ":TSD5prime", "Note" => "Site:$5"});
+	    push(@gffline2, {"Parent" => $te_id, "ID" => $te_id . ":TSD3prime", "Note" => "Site:$5"});
+
+	    ## Modify the TE start and end
+	    $ltrcatch{$curr_seqid}->[$last_idx]->[0]->[3] = $gffline1[3];
+	    $ltrcatch{$curr_seqid}->[$last_idx]->[0]->[4] = $gffline2[4];
+
+	    push(@{$ltrcatch{$curr_seqid}->[$last_idx]}, \@gffline1);
+	    push(@{$ltrcatch{$curr_seqid}->[$last_idx]}, \@gffline2);
+        }
+        elsif ($_ =~ m/^Sharpness:\s+(.+),(.+)$/) {
+
+	    ## Add Sharpeness to the LTR boundaries
+	    $ltrcatch{$curr_seqid}->[$last_idx]->[3]->[8]->{"Note"} = "Sharpness:$1";
+	    $ltrcatch{$curr_seqid}->[$last_idx]->[4]->[8]->{"Note"} = "Sharpness:$2";
+        }
+        elsif ($_ =~ m/^PPT\s+:\s+\[(.+)\/(.+)\]\s+(\d+)\s+-\s+(\d+)$/) {
+
+	    my @gffline = ($curr_seqid, "LTRFinder", "RR_tract", $3, $4, ".", "?", ".");
+	    my $element_id = $curr_ltrid . ":PPT";
+            push(@gffline, { "ID" => $element_id, "Parent" => $curr_ltrid, "Note" => "PurineN:".$1.",PPTLength:".$2});
+            push(@{$ltrcatch{$curr_seqid}->[$last_idx]}, \@gffline);
+        }
+        elsif ($_ =~ m/^PBS\s+:\s+\[(.+)\/(.+)\]\s+(\d+)\s+-\s+(\d+)\s+\((.+)\)$/) {
+
+            my @gffline = ($curr_seqid, "LTRFinder", "primer_binding_site", $3, $4, ".", "?", ".");
+            my $element_id = $curr_ltrid . ":PBS";
+            push(@gffline, { "ID" => $element_id, "Parent" => $curr_ltrid, "Note" => "MatchedBases:".$1.",PBSLength:".$2.",tRNAType:".$5});
+            push(@{$ltrcatch{$curr_seqid}->[$last_idx]}, \@gffline);
+        }
+        elsif ($_ =~ m/^Domain:\s+(\d+)\s+-\s+(\d+)\s+\[possible\s+ORF:(\d+)-(\d+),\s+\((.+)\)\]$/) {
+
+	    ## This line gives the match with a possible transposon gene, including the ORF
+            ## It will be coded with two lines: ORF and transposable_element_gene
+	    my @gffline1 = ($curr_seqid, "LTRFinder", "transposable_element_gene", $1, $2, ".", "?", ".");
+            my @gffline2 = ($curr_seqid, "LTRFinder", "ORF", $3, $4, ".", "?", ".");
+	    my $genename = $5;
+	    if ($genename =~ m/^(.+)\s+\((.+)\)$/) {
+        
+	        my $ngname = $1."_".$2;
+	        $genename = $ngname;
+            }
+ 
+            my $te_id = $ltrcatch{$curr_seqid}->[$last_idx]->[0]->[8]->{"ID"};
+            my $tegene_id = $te_id . ":Gene_" . $genename;
+            push(@gffline1, {"Parent" => $te_id, "ID" => $tegene_id });
+            push(@gffline2, {"Parent" => $tegene_id, "ID" => $tegene_id . "_ORF"});
+
+	    push(@{$ltrcatch{$curr_seqid}->[$last_idx]}, \@gffline1);
+            push(@{$ltrcatch{$curr_seqid}->[$last_idx]}, \@gffline2);
+        }
+    }
+    return(\@seqidsizes, \%ltrcatch);    
+}
