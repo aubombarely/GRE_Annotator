@@ -35,6 +35,7 @@ The tools that this program uses are:
  - BLAST+ (ftp://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/LATEST/).
  - GenomeTools (http://genometools.org/tools.html).
  - LTR_Finder (https://github.com/xzhub/LTR_Finder).
+ - MGESCAN (https://github.com/MGEScan/mgescan).
  - LTR_retriever (https://github.com/oushujun/LTR_retriever).
  - HelitronScanner (https://sourceforge.net/p/helitronscanner).
  - MITE_Hunter (http://target.iplantcollaborative.org/).
@@ -47,5 +48,6 @@ The tools that this program uses are:
  - tRNAScan-SE (http://lowelab.ucsc.edu/tRNAscan-SE/).
  - BARRNAp (https://github.com/tseemann/barrnap).
  - Bedtools (https://bedtools.readthedocs.io/en/latest/content/bedtools-suite.html).
+ - Muscle (https://www.ebi.ac.uk/Tools/msa/muscle/).
 
-
+Additionally this program uses Bioperl (https://bioperl.org/).
