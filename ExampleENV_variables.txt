@@ -1,0 +1,11 @@
+#!/bin/bash
+
+BARRNAP_PATH=/data/software/barrnap/bin/
+LTRFINDER_PATH=/data/software/LTR_Finder/source/
+LTRRETRIEVER_PATH=/data/software/LTR_retriever/
+MITEFINDER_PATH=/data/software/miteFinder/
+MITEHUNTER_PATH=/data/software/MITEhunter/MITE_Hunter/
+REPEATMASKER_PATH=/data/software/RepeatMasker-v4.0.8/
+REPEATMODELER_PATH=/data/software/RepeatModeler-open-1.0.11/
+HELITRONSCANNER_JAR=/data/software/HelitronScanner/HelitronScanner/HelitronScanner.jar 
+PFSCAN_DIR=/data/software/InterProScan/interproscan-5.19-58.0/bin/prosite/
